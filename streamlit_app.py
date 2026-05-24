@@ -4,7 +4,8 @@ from app.agents import (
     query_builder_agent,
     job_fetch_agent,
     ai_filter_agent,
-    email_agent
+    email_agent,
+    enrich_jobs_with_hr_emails_and_emails
 )
 from app.email_service import send_email
 from app.excel_service import save_jobs_to_excel
@@ -26,15 +27,12 @@ with col1:
     position = st.selectbox(
         "Select Position",
         [
-            "DevOps Engineer",
-            "MLOps Engineer",
-            "Data Analyst",
-            "Data Scientist",
-            "Machine Learning Engineer",
-            "AI Engineer",
-            "Cloud Engineer",
-            "Backend Developer",
-            "Other"
+            "AI Program Manager",
+            "AI Implementation Lead",
+            "Project Manager - Transformation",
+            "BI Lead",
+            "BI Manager",
+            "Digital Transformation"
         ]
     )
 
@@ -79,10 +77,8 @@ with col4:
 with col5:
     phone = st.text_input("Your Phone")
     profile = st.text_area("Short Profile Summary")
+
 resume_file = st.file_uploader("Upload Resume (PDF/DOCX)", type=["pdf", "docx"])
-# -------------------------------
-# SEARCH BUTTON
-# -------------------------------
 
 # -------------------------------
 # SEARCH BUTTON
@@ -90,27 +86,39 @@ resume_file = st.file_uploader("Upload Resume (PDF/DOCX)", type=["pdf", "docx"])
 
 if st.button("🚀 Search Jobs"):
 
-    user_input = f"""
-    Position: {position}
-    Experience: {experience}
-    Location: {location}
-    Skills: {skills}
-    """
-
-    optimized_query = query_builder_agent(user_input)
-    jobs = job_fetch_agent(optimized_query)
-
-    if jobs:
-        filtered_jobs = ai_filter_agent(jobs, user_input)
-
-        if filtered_jobs:
-            st.session_state.jobs = filtered_jobs
-            save_jobs_to_excel(filtered_jobs)
-            st.success(f"{len(filtered_jobs)} jobs found!")
-        else:
-            st.warning("No matching jobs found.")
+    if not name or not email:
+        st.warning("Please fill in your Name and Email before searching.")
     else:
-        st.error("No jobs found.")
+        user_input = f"""
+        Position: {position}
+        Experience: {experience}
+        Location: {location}
+        Skills: {skills}
+        """
+
+        candidate = {
+            "name": name,
+            "email": email,
+            "phone": phone,
+            "profile": profile
+        }
+
+        optimized_query = query_builder_agent(user_input)
+        jobs = job_fetch_agent(optimized_query)
+
+        if jobs:
+            filtered_jobs = ai_filter_agent(jobs, user_input)
+
+            if filtered_jobs:
+                with st.spinner("Finding HR emails and preparing application emails for all jobs..."):
+                    enriched = enrich_jobs_with_hr_emails_and_emails(filtered_jobs, candidate)
+                st.session_state.jobs = enriched
+                save_jobs_to_excel(enriched)
+                st.success(f"{len(enriched)} jobs found and emails prepared!")
+            else:
+                st.warning("No matching jobs found.")
+        else:
+            st.error("No jobs found.")
 
 
 # -------------------------------
@@ -121,71 +129,53 @@ if "jobs" in st.session_state:
 
     st.subheader("📋 Filtered Jobs")
 
+    # Save resume once for reuse across all send actions
+    resume_path = None
+    if resume_file:
+        resume_dir = os.path.join("/tmp", "resumes")
+        os.makedirs(resume_dir, exist_ok=True)
+        resume_path = os.path.join(resume_dir, resume_file.name)
+        with open(resume_path, "wb") as f:
+            f.write(resume_file.getbuffer())
+
     for i, job in enumerate(st.session_state.jobs):
         with st.expander(f"{job['title']} - {job['company']}"):
             st.write("📍 Location:", job["location"])
             st.write("🔗 Link:", job["link"])
             st.write(job["description"])
 
+            st.markdown("---")
 
-    st.header("✉ Apply to First Job")
+            # HR email row — editable so user can correct if wrong
+            hr_email_key = f"hr_email_{i}"
+            found_hr = job.get("hr_email", "")
+            hr_email_input = st.text_input(
+                "HR Email",
+                value=found_hr,
+                key=hr_email_key,
+                placeholder="HR email (auto-found or enter manually)"
+            )
 
-    candidate = {
-        "name": name,
-        "email": email,
-        "phone": phone,
-        "profile": profile
-    }
+            # Draft email — editable
+            draft_key = f"draft_{i}"
+            draft = st.text_area(
+                "Application Email Draft",
+                value=job.get("email_draft", ""),
+                height=250,
+                key=draft_key
+            )
 
-    if st.button("Generate Email"):
-
-        first_job = st.session_state.jobs[0]
-        email_text = email_agent(first_job, candidate)
-
-        st.session_state.generated_email = email_text
-
-
-# -------------------------------
-# SHOW GENERATED EMAIL
-# -------------------------------
-# -------------------------------
-# SHOW GENERATED EMAIL
-# -------------------------------
-
-if "generated_email" in st.session_state:
-
-    st.text_area("Generated Email", st.session_state.generated_email, height=300)
-
-    hr_email = st.text_input("Enter HR Email")
-
-    if st.button("📨 Send Email"):
-
-        if not hr_email:
-            st.warning("Please enter HR email.")
-        else:
-            first_job = st.session_state.jobs[0]
-            resume_path = None
-
-            # Save uploaded resume temporarily
-            if resume_file:
-                
-            # Create pdf folder if not exists
-                    os.makedirs("pdf", exist_ok=True)
-
-                    resume_path = os.path.join("pdf", resume_file.name)
-
-                    with open(resume_path, "wb") as f:
-                        f.write(resume_file.getbuffer())
-
-            try:
-                send_email(
-                    hr_email,
-                    f"Application for {first_job['title']}",
-                    st.session_state.generated_email,
-                    attachment_path=resume_path
-                )
-
-                st.success("✅ Email Sent Successfully with Resume!")
-
-            except Exception as e:
-                st.error(f"❌ Failed to send email: {e}")
+            if st.button(f"📨 Send Email for {job['title']}", key=f"send_{i}"):
+                if not hr_email_input:
+                    st.warning("Please enter the HR email before sending.")
+                else:
+                    try:
+                        send_email(
+                            hr_email_input,
+                            f"Application for {job['title']}",
+                            draft,
+                            attachment_path=resume_path
+                        )
+                        st.success(f"✅ Email sent to {hr_email_input}!")
+                    except Exception as e:
+                        st.error(f"❌ Failed to send email: {e}")

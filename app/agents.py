@@ -1,7 +1,10 @@
+import re
 import json
 from serpapi import GoogleSearch
 from google import genai
 from app.config import GEMINI_API_KEY, SERPAPI_KEY
+
+GEMINI_MODEL = "gemini-2.5-flash"
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -19,7 +22,7 @@ def query_builder_agent(user_input):
     """
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model=GEMINI_MODEL,
         contents=prompt
     )
 
@@ -73,23 +76,23 @@ def ai_filter_agent(jobs, user_input):
     """
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model=GEMINI_MODEL,
         contents=prompt
     )
 
     raw_text = response.text.strip()
 
-    try:
-        # Remove markdown if exists
-        if raw_text.startswith("```"):
-            raw_text = raw_text.split("```")[1]
+    # Strip markdown code fences if present
+    if raw_text.startswith("```"):
+        lines = raw_text.split("\n")
+        raw_text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
 
+    try:
         filtered_jobs = json.loads(raw_text)
         print(f"✅ {len(filtered_jobs)} jobs matched AI filter")
         return filtered_jobs
-
-    except Exception as e:
-        print("⚠ AI formatting issue. Returning all jobs.")
+    except json.JSONDecodeError as e:
+        print(f"⚠ Could not parse AI response as JSON: {e}")
         print("DEBUG Gemini Output:", raw_text)
         return jobs
 
@@ -113,8 +116,61 @@ def email_agent(job, candidate_details):
     """
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model=GEMINI_MODEL,
         contents=prompt
     )
 
     return response.text
+
+
+def hr_email_finder_agent(company, job_title):
+    print(f"📧 Finding HR email for {company}...")
+
+    params = {
+        "engine": "google",
+        "q": f'"{company}" HR recruiter email "{job_title}" OR careers OR recruitment contact',
+        "api_key": SERPAPI_KEY,
+        "num": 5
+    }
+
+    search = GoogleSearch(params)
+    results = search.get_dict()
+
+    snippets = []
+    for result in results.get("organic_results", [])[:5]:
+        snippets.append(result.get("snippet", ""))
+        snippets.append(result.get("title", ""))
+
+    # First try to extract email directly with regex
+    combined = " ".join(snippets)
+    emails_found = re.findall(r"[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}", combined)
+    if emails_found:
+        return emails_found[0]
+
+    # Fall back to Gemini extraction
+    prompt = f"""
+    Extract a valid HR or recruitment email address for the company "{company}" from these search snippets.
+
+    Snippets:
+    {chr(10).join(snippets)}
+
+    Return ONLY the email address. If none found, return "Not found".
+    """
+
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt
+    )
+
+    result_text = response.text.strip()
+    return result_text if "@" in result_text else None
+
+
+def enrich_jobs_with_hr_emails_and_emails(jobs, candidate_details):
+    """Attach hr_email and email_draft to each job in-place."""
+    for job in jobs:
+        company = job.get("company", "")
+        title = job.get("title", "")
+        job["hr_email"] = hr_email_finder_agent(company, title) or ""
+        job["email_draft"] = email_agent(job, candidate_details)
+    return jobs
